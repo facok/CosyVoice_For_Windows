@@ -10,6 +10,7 @@ import requests
 from pydub import AudioSegment
 
 import numpy as np
+import librosa
 from flask import Flask, request, Response,send_from_directory
 import torch
 import torchaudio
@@ -78,6 +79,28 @@ def download_and_convert(mp3_url, wav_filename):
             os.remove("temp.mp3")
         except OSError as e:
             print(f"删除临时文件时出错: {e}")
+
+def postprocess(speech, top_db=60, hop_length=220, win_length=440, max_val=0.8, target_sr=22050): # Added target_sr to make it configurable if needed
+    # Assuming librosa is available or will be imported. If not, this needs to be handled.
+    # For now, let's assume librosa can be imported.
+    import librosa
+    speech, _ = librosa.effects.trim(
+        speech, top_db=top_db,
+        frame_length=win_length,
+        hop_length=hop_length
+    )
+    if torch.is_tensor(speech) and speech.abs().max() > max_val: # Check if speech is a tensor
+        speech = speech / speech.abs().max() * max_val
+    elif not torch.is_tensor(speech) and np.abs(speech).max() > max_val: # Handle numpy array case
+         speech = speech / np.abs(speech).max() * max_val
+    # Ensure speech is a tensor before concatenating
+    if not torch.is_tensor(speech):
+        speech = torch.tensor(speech, dtype=torch.float32)
+    if speech.ndim == 1: # Ensure it's 2D for concat
+        speech = speech.unsqueeze(0)
+    speech = torch.concat([speech, torch.zeros(1, int(target_sr * 0.2))], dim=1)
+    return speech
+
 def speed_change(input_audio: np.ndarray, speed: float, sr: int):
     # 检查输入数据类型和声道数
     if input_audio.dtype != np.int16:
@@ -321,6 +344,70 @@ def speakers_list():
 @app.route('/file/<filename>')
 def uploaded_file(filename):
     return send_from_directory("音频输出", filename)
+
+
+@app.route("/zero_shot_inference", methods=['POST'])
+def zero_shot_inference():
+    data = request.get_json()
+    text = data.get('text')
+    prompt_text = data.get('prompt_text')
+    prompt_audio_url = data.get('prompt_audio_url')
+    speed = request.args.get('speed', 1.0)
+
+    if not all([text, prompt_text, prompt_audio_url]):
+        return {"error": "Missing required parameters: text, prompt_text, or prompt_audio_url"}, 400
+
+    try:
+        speed = float(speed)
+    except ValueError:
+        return {"error": "Invalid speed parameter, must be a float"}, 400
+
+    download_and_convert(prompt_audio_url, "prompt_audio.wav")
+
+    prompt_sr = 16000
+    try:
+        # Load and preprocess the prompt audio
+        prompt_audio_data = load_wav("prompt_audio.wav", sr=prompt_sr)
+        prompt_speech_16k = postprocess(prompt_audio_data)
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error processing prompt audio: {e}")
+        # Consider removing the temp file if it exists
+        if os.path.exists("prompt_audio.wav"):
+            os.remove("prompt_audio.wav")
+        return {"error": f"Failed to process prompt audio: {e}"}, 500
+
+
+    tts_speeches = []
+    try:
+        for i, j in enumerate(cosyvoice.inference_zero_shot(text, prompt_text, prompt_speech_16k, stream=False, speed=speed)):
+            tts_speeches.append(j['tts_speech'])
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error during zero-shot inference: {e}")
+        # Consider removing the temp file if it exists
+        if os.path.exists("prompt_audio.wav"):
+            os.remove("prompt_audio.wav")
+        return {"error": f"Inference failed: {e}"}, 500
+
+
+    if not tts_speeches:
+        # Clean up prompt_audio.wav if it exists
+        if os.path.exists("prompt_audio.wav"):
+            os.remove("prompt_audio.wav")
+        return {"error": "Inference returned no audio"}, 500
+
+    audio_data = torch.concat(tts_speeches, dim=1)
+
+    buffer = io.BytesIO()
+    torchaudio.save(buffer, audio_data, 22050, format="wav")
+    buffer.seek(0)
+
+    # Clean up prompt_audio.wav if it exists
+    if os.path.exists("prompt_audio.wav"):
+        os.remove("prompt_audio.wav")
+
+    return Response(buffer.read(), mimetype="audio/wav")
     
 
 if __name__ == "__main__":
