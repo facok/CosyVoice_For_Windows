@@ -348,33 +348,120 @@ def uploaded_file(filename):
 
 @app.route("/zero_shot_inference", methods=['POST'])
 def zero_shot_inference():
-    data = request.get_json()
-    text = data.get('text')
-    prompt_text = data.get('prompt_text')
-    prompt_audio_url = data.get('prompt_audio_url')
-    speed = request.args.get('speed', 1.0)
+    """
+    Synthesizes speech from text using a prompt audio for zero-shot voice cloning.
 
-    if not all([text, prompt_text, prompt_audio_url]):
-        return {"error": "Missing required parameters: text, prompt_text, or prompt_audio_url"}, 400
+    This endpoint accepts POST requests with `multipart/form-data`.
+
+    Required Form Fields:
+    - `text` (string): The text to be synthesized into speech.
+    - `prompt_text` (string): The transcript of the prompt audio. This should closely match the content of the prompt audio.
+
+    Audio Input (provide one of the following, `prompt_audio_file` is prioritized):
+    - `prompt_audio_file` (file): An audio file (e.g., WAV, MP3) uploaded by the client. This is the preferred method for providing the prompt audio.
+    - `prompt_audio_url` (string): A URL pointing to an audio file. This is used as a fallback if `prompt_audio_file` is not provided.
+
+    Optional Query Parameter:
+    - `speed` (float): Controls the speed of the synthesized speech. Defaults to 1.0. Values less than 1.0 will slow down the speech, and values greater than 1.0 will speed it up.
+
+    Successful Response:
+    - HTTP 200 OK: Returns a WAV audio file (`audio/wav`) containing the synthesized speech.
+
+    Error Responses:
+    - HTTP 400 Bad Request:
+        - If required form fields (`text`, `prompt_text`, and one of `prompt_audio_file` or `prompt_audio_url`) are missing.
+        - If the `speed` parameter is not a valid float.
+        - If an uploaded `prompt_audio_file` cannot be converted to WAV format (e.g., unsupported audio type or corrupted file).
+    - HTTP 500 Internal Server Error:
+        - If downloading or converting audio from `prompt_audio_url` fails.
+        - If processing the prompt audio (loading, postprocessing) fails.
+        - If the core zero-shot inference process fails.
+        - If the inference process returns no audio data.
+
+    Example Usage (curl):
+
+    1. Using File Upload:
+    ```curl
+    curl -X POST -F "text=Hello world, this is a test." \
+         -F "prompt_text=This is the content of my prompt audio." \
+         -F "prompt_audio_file=@/path/to/your/sample_audio.wav" \
+         "http://127.0.0.1:9880/zero_shot_inference?speed=1.1" \
+         -o output_speech.wav
+    ```
+
+    2. Using URL for Prompt Audio:
+    ```curl
+    curl -X POST -F "text=Another example sentence for synthesis." \
+         -F "prompt_text=This is what the URL audio says." \
+         -F "prompt_audio_url=http://example.com/audio_prompt.mp3" \
+         "http://127.0.0.1:9880/zero_shot_inference?speed=0.9" \
+         -o output_speech_from_url.wav
+    ```
+    """
+    text = request.form.get('text')
+    prompt_text = request.form.get('prompt_text')
+    prompt_audio_url = request.form.get('prompt_audio_url')
+    prompt_audio_file = request.files.get('prompt_audio_file')
+    speed = request.args.get('speed', 1.0) # Speed can remain a query param
+
+    if not all([text, prompt_text]) or not (prompt_audio_file or prompt_audio_url):
+        return {"error": "Missing required form fields: text, prompt_text, and either prompt_audio_file or prompt_audio_url"}, 400
 
     try:
         speed = float(speed)
     except ValueError:
         return {"error": "Invalid speed parameter, must be a float"}, 400
 
-    download_and_convert(prompt_audio_url, "prompt_audio.wav")
+    prompt_audio_target_filename = "prompt_audio.wav"
+    uploaded_temp_audio_path = "uploaded_prompt_audio" # Temporary path for any uploaded file
+
+    if prompt_audio_file:
+        prompt_audio_file.save(uploaded_temp_audio_path)
+        original_filename = prompt_audio_file.filename
+
+        if original_filename.lower().endswith('.wav'):
+            # If already WAV, just rename/move
+            if os.path.exists(prompt_audio_target_filename):
+                 os.remove(prompt_audio_target_filename) # remove previous one if any
+            os.rename(uploaded_temp_audio_path, prompt_audio_target_filename)
+        else:
+            # Convert to WAV
+            try:
+                sound = AudioSegment.from_file(uploaded_temp_audio_path) # pydub infers format
+                sound.export(prompt_audio_target_filename, format="wav")
+                print(f"Uploaded file {original_filename} converted to {prompt_audio_target_filename}")
+            except Exception as e:
+                if os.path.exists(uploaded_temp_audio_path): # Clean up temp uploaded file
+                    os.remove(uploaded_temp_audio_path)
+                print(f"Error converting uploaded audio: {e}")
+                return {"error": f"Could not convert uploaded audio file. Ensure it's a valid audio format (e.g., MP3, WAV). Error: {e}"}, 400
+            finally:
+                # Clean up the intermediate uploaded file if it exists and is different from target
+                if os.path.exists(uploaded_temp_audio_path) and uploaded_temp_audio_path != prompt_audio_target_filename :
+                    os.remove(uploaded_temp_audio_path)
+
+    elif prompt_audio_url:
+        try:
+            download_and_convert(prompt_audio_url, prompt_audio_target_filename)
+        except Exception as e: # download_and_convert might raise various exceptions
+            print(f"Error downloading or converting audio from URL: {e}")
+            return {"error": f"Failed to download or convert audio from URL: {e}"}, 500
+    else:
+        # This case should be caught by the initial check, but as a safeguard:
+        return {"error": "No audio source provided (file or URL)."}, 400
+
 
     prompt_sr = 16000
     try:
         # Load and preprocess the prompt audio
-        prompt_audio_data = load_wav("prompt_audio.wav", sr=prompt_sr)
+        prompt_audio_data = load_wav(prompt_audio_target_filename, sr=prompt_sr)
         prompt_speech_16k = postprocess(prompt_audio_data)
     except Exception as e:
         # Log the error for debugging
-        print(f"Error processing prompt audio: {e}")
+        print(f"Error processing prompt audio {prompt_audio_target_filename}: {e}")
         # Consider removing the temp file if it exists
-        if os.path.exists("prompt_audio.wav"):
-            os.remove("prompt_audio.wav")
+        if os.path.exists(prompt_audio_target_filename):
+            os.remove(prompt_audio_target_filename)
         return {"error": f"Failed to process prompt audio: {e}"}, 500
 
 
