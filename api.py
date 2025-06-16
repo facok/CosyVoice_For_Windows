@@ -486,6 +486,13 @@ def zero_shot_inference():
 
     audio_data = torch.concat(tts_speeches, dim=1)
 
+    debug_output_filename = "debug_server_audio.wav"
+    try:
+        torchaudio.save(debug_output_filename, audio_data, 22050, format="wav")
+        print(f"DEBUG: Audio temporarily saved to {os.path.abspath(debug_output_filename)}")
+    except Exception as e_debug_save:
+        print(f"DEBUG: Failed to save debug audio to {debug_output_filename}: {e_debug_save}")
+
     buffer = io.BytesIO()
     torchaudio.save(buffer, audio_data, 22050, format="wav")
     buffer.seek(0)
