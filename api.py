@@ -473,15 +473,15 @@ def zero_shot_inference():
         # Log the error for debugging
         print(f"Error during zero-shot inference: {e}")
         # Consider removing the temp file if it exists
-        if os.path.exists("prompt_audio.wav"):
-            os.remove("prompt_audio.wav")
+        if os.path.exists(prompt_audio_target_filename):
+            os.remove(prompt_audio_target_filename)
         return {"error": f"Inference failed: {e}"}, 500
 
 
     if not tts_speeches:
-        # Clean up prompt_audio.wav if it exists
-        if os.path.exists("prompt_audio.wav"):
-            os.remove("prompt_audio.wav")
+        # Clean up prompt_audio_target_filename if it exists
+        if os.path.exists(prompt_audio_target_filename):
+            os.remove(prompt_audio_target_filename)
         return {"error": "Inference returned no audio"}, 500
 
     audio_data = torch.concat(tts_speeches, dim=1)
@@ -489,12 +489,15 @@ def zero_shot_inference():
     buffer = io.BytesIO()
     torchaudio.save(buffer, audio_data, 22050, format="wav")
     buffer.seek(0)
+    audio_bytes = buffer.read()
 
-    # Clean up prompt_audio.wav if it exists
-    if os.path.exists("prompt_audio.wav"):
-        os.remove("prompt_audio.wav")
+    # Clean up prompt_audio_target_filename if it exists
+    if os.path.exists(prompt_audio_target_filename):
+        os.remove(prompt_audio_target_filename)
 
-    return Response(buffer.read(), mimetype="audio/wav")
+    response = Response(audio_bytes, mimetype="audio/wav")
+    response.headers["Content-Length"] = str(len(audio_bytes))
+    return response
     
 
 if __name__ == "__main__":
