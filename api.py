@@ -454,7 +454,7 @@ def zero_shot_inference():
     prompt_sr = 16000
     try:
         # Load and preprocess the prompt audio
-        prompt_audio_data = load_wav(prompt_audio_target_filename, sr=prompt_sr)
+        prompt_audio_data = load_wav(prompt_audio_target_filename, prompt_sr)
         prompt_speech_16k = postprocess(prompt_audio_data)
     except Exception as e:
         # Log the error for debugging
